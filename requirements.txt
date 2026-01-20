@@ -1,0 +1,36 @@
+# Core framework
+asyncio>=3.4.3
+
+# Browser automation
+playwright>=1.40.0
+
+# AI APIs
+anthropic>=0.25.0
+openai>=1.12.0
+elevenlabs>=0.2.24
+
+# Screen capture
+mss>=9.0.1
+opencv-python>=4.8.1
+Pillow>=10.1.0
+numpy>=1.26.2
+
+# Audio processing
+PyAudio>=0.2.14
+webrtcvad>=2.0.10
+pydub>=0.25.1
+
+# Overlay/GUI (macOS)
+PyQt6>=6.6.1
+pyobjc-framework-Quartz>=10.1
+pyobjc-framework-Cocoa>=10.1
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+aiofiles>=23.2.1
+
+# Testing
+pytest>=7.4.3
+pytest-asyncio>=0.21.1
+pytest-mock>=3.12.0
