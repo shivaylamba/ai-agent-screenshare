@@ -1,7 +1,7 @@
 """Text-to-speech using ElevenLabs API."""
 import asyncio
 from typing import Optional
-from elevenlabs import generate, set_api_key, voices
+from elevenlabs.client import ElevenLabs
 from simple_logger import logger
 from config import config
 from utils.performance import measure_time_async
@@ -12,7 +12,7 @@ class TextToSpeech:
 
     def __init__(self):
         """Initialize ElevenLabs TTS client."""
-        set_api_key(config.tts.elevenlabs_api_key)
+        self.client = ElevenLabs(api_key=config.tts.elevenlabs_api_key)
         self.voice_id = config.tts.voice_id
         self.model = config.tts.model
         self._cache = {}  # Simple response cache
@@ -45,14 +45,21 @@ class TextToSpeech:
 
             # Generate speech (run in thread pool since it's blocking)
             loop = asyncio.get_event_loop()
-            audio = await loop.run_in_executor(
-                None,
-                lambda: generate(
+
+            def _generate():
+                # Use ElevenLabs SDK text_to_speech.convert API
+                response = self.client.text_to_speech.convert(
+                    voice_id=self.voice_id,
+                    model_id=self.model,
                     text=text,
-                    voice=self.voice_id,
-                    model=self.model
+                    output_format="mp3_22050_32",
                 )
-            )
+                # The response may be raw bytes or an iterator of chunks; normalize to bytes.
+                if hasattr(response, "__iter__") and not isinstance(response, (bytes, bytearray)):
+                    return b"".join(response)
+                return response
+
+            audio = await loop.run_in_executor(None, _generate)
 
             # Cache short, common responses
             if use_cache and len(text) < 100:
@@ -104,8 +111,8 @@ class TextToSpeech:
         """
         try:
             loop = asyncio.get_event_loop()
-            voice_list = await loop.run_in_executor(None, voices)
-            return voice_list
+            voice_response = await loop.run_in_executor(None, self.client.voices.get_all)
+            return voice_response.voices
         except Exception as e:
             logger.error(f"Error listing voices: {e}")
             return []

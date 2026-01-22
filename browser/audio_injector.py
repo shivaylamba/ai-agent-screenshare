@@ -27,42 +27,46 @@ class AudioInjector:
             return
 
         try:
-            # Inject JavaScript to set up audio context
-            await self.page.add_init_script("""
-                // Create audio context
-                window.customAudioContext = new (window.AudioContext || window.webkitAudioContext)();
-                window.customAudioQueue = [];
-                window.isPlayingCustomAudio = false;
+            # Inject JavaScript directly into the page (since page is already loaded)
+            # This ensures the function is available immediately
+            await self.page.evaluate("""
+                // Only initialize if not already initialized
+                if (!window.customAudioContext) {
+                    // Create audio context
+                    window.customAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    window.customAudioQueue = [];
+                    window.isPlayingCustomAudio = false;
 
-                // Function to play audio from base64
-                window.playCustomAudio = async function(base64Audio) {
-                    try {
-                        // Decode base64 to array buffer
-                        const binaryString = atob(base64Audio);
-                        const bytes = new Uint8Array(binaryString.length);
-                        for (let i = 0; i < binaryString.length; i++) {
-                            bytes[i] = binaryString.charCodeAt(i);
+                    // Function to play audio from base64
+                    window.playCustomAudio = async function(base64Audio) {
+                        try {
+                            // Decode base64 to array buffer
+                            const binaryString = atob(base64Audio);
+                            const bytes = new Uint8Array(binaryString.length);
+                            for (let i = 0; i < binaryString.length; i++) {
+                                bytes[i] = binaryString.charCodeAt(i);
+                            }
+
+                            // Decode audio data
+                            const audioBuffer = await window.customAudioContext.decodeAudioData(bytes.buffer);
+
+                            // Create source
+                            const source = window.customAudioContext.createBufferSource();
+                            source.buffer = audioBuffer;
+                            source.connect(window.customAudioContext.destination);
+
+                            // Play
+                            source.start(0);
+
+                            return true;
+                        } catch (error) {
+                            console.error('Error playing custom audio:', error);
+                            return false;
                         }
+                    };
 
-                        // Decode audio data
-                        const audioBuffer = await window.customAudioContext.decodeAudioData(bytes.buffer);
-
-                        // Create source
-                        const source = window.customAudioContext.createBufferSource();
-                        source.buffer = audioBuffer;
-                        source.connect(window.customAudioContext.destination);
-
-                        // Play
-                        source.start(0);
-
-                        return true;
-                    } catch (error) {
-                        console.error('Error playing custom audio:', error);
-                        return false;
-                    }
-                };
-
-                console.log('Custom audio context initialized');
+                    console.log('Custom audio context initialized');
+                }
             """)
 
             self._audio_context_initialized = True
@@ -85,10 +89,48 @@ class AudioInjector:
             # Convert audio to base64
             audio_base64 = base64.b64encode(audio_data).decode('utf-8')
 
-            # Play audio through browser
-            result = await self.page.evaluate(f"""
-                window.playCustomAudio('{audio_base64}')
-            """)
+            # Use a more robust injection method that handles large strings
+            # We'll pass the base64 as a separate argument to avoid f-string issues
+            result = await self.page.evaluate("""
+                async function(base64Audio) {
+                    // Re-initialize if needed (safety check)
+                    if (!window.customAudioContext) {
+                        window.customAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    }
+                    
+                    if (!window.playCustomAudio) {
+                        window.playCustomAudio = async function(base64Audio) {
+                            try {
+                                // Decode base64 to array buffer
+                                const binaryString = atob(base64Audio);
+                                const bytes = new Uint8Array(binaryString.length);
+                                for (let i = 0; i < binaryString.length; i++) {
+                                    bytes[i] = binaryString.charCodeAt(i);
+                                }
+
+                                // Decode audio data (supports MP3, WAV, etc.)
+                                const audioBuffer = await window.customAudioContext.decodeAudioData(bytes.buffer);
+
+                                // Create source
+                                const source = window.customAudioContext.createBufferSource();
+                                source.buffer = audioBuffer;
+                                source.connect(window.customAudioContext.destination);
+
+                                // Play
+                                source.start(0);
+
+                                return true;
+                            } catch (error) {
+                                console.error('Error playing custom audio:', error);
+                                return false;
+                            }
+                        };
+                    }
+
+                    // Call the function
+                    return await window.playCustomAudio(base64Audio);
+                }
+            """, audio_base64)
 
             if result:
                 logger.success("Audio injected successfully")

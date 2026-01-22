@@ -11,7 +11,9 @@ load_dotenv()
 class AudioConfig(BaseModel):
     """Audio processing configuration."""
     sample_rate: int = Field(default=16000, description="Audio sample rate in Hz")
-    chunk_size: int = Field(default=1024, description="Audio chunk size for processing")
+    # For WebRTC VAD, chunks must be 10, 20, or 30 ms.
+    # At 16kHz, 20ms == 320 samples, which we use as the default.
+    chunk_size: int = Field(default=320, description="Audio chunk size for processing (samples per chunk)")
     channels: int = Field(default=1, description="Number of audio channels (1=mono)")
     vad_aggressiveness: int = Field(default=2, ge=0, le=3, description="Voice activity detection aggressiveness (0-3)")
     silence_duration: float = Field(default=0.5, description="Duration of silence to consider end of speech (seconds)")
@@ -28,7 +30,12 @@ class ScreenCaptureConfig(BaseModel):
 class AIConfig(BaseModel):
     """AI model configuration."""
     anthropic_api_key: str = Field(default_factory=lambda: os.getenv('ANTHROPIC_API_KEY', ''))
-    model: str = Field(default="claude-3-5-sonnet-20241022", description="Claude model ID")
+    # Use a known-available Claude model by default, with optional env override.
+    # You can set ANTHROPIC_MODEL in your environment to try a different model.
+    model: str = Field(
+        default_factory=lambda: os.getenv('ANTHROPIC_MODEL', 'claude-sonnet-4-5-20250929'),
+        description="Claude model ID",
+    )
     max_tokens: int = Field(default=1024, description="Maximum tokens for AI responses")
     temperature: float = Field(default=0.7, ge=0.0, le=1.0, description="Temperature for AI responses")
     max_context_messages: int = Field(default=10, description="Maximum number of messages in context history")
@@ -39,8 +46,8 @@ class TTSConfig(BaseModel):
     """Text-to-speech configuration."""
     provider: str = Field(default="elevenlabs", description="TTS provider (elevenlabs or google)")
     elevenlabs_api_key: str = Field(default_factory=lambda: os.getenv('ELEVENLABS_API_KEY', ''))
-    voice_id: str = Field(default="Rachel", description="Voice ID for TTS")
-    model: str = Field(default="eleven_monolingual_v1", description="TTS model")
+    voice_id: str = Field(default="JBFqnCBsd6RMkjVDRZzb", description="Voice ID for TTS")
+    model: str = Field(default="eleven_multilingual_v2", description="TTS model")
 
 
 class STTConfig(BaseModel):

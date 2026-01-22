@@ -1,5 +1,6 @@
 """Main orchestrator coordinating all components."""
 import asyncio
+import sys
 from typing import Optional
 from simple_logger import logger
 from core.event_bus import EventBus, Event
@@ -9,9 +10,12 @@ from browser.audio_injector import AudioInjector
 from capture.screen_capturer import ScreenCapturer
 from capture.frame_buffer import FrameBuffer
 from audio.audio_manager import AudioManager
+from audio.audio_capture import AudioCapture
 from ai.vision_analyzer import VisionAnalyzer
 from ai.context_manager import ContextManager
 from overlay.annotation_manager import AnnotationManager
+from overlay.qt_integration import QtOverlayIntegration
+from overlay.macos_overlay import Annotation
 from config import config
 
 
@@ -30,9 +34,11 @@ class Orchestrator:
         self.screen_capturer: Optional[ScreenCapturer] = None
         self.frame_buffer: Optional[FrameBuffer] = None
         self.audio_manager: Optional[AudioManager] = None
+        self.audio_capture: Optional[AudioCapture] = None
         self.vision_analyzer: Optional[VisionAnalyzer] = None
         self.context_manager: Optional[ContextManager] = None
         self.annotation_manager: Optional[AnnotationManager] = None
+        self.qt_integration: Optional[QtOverlayIntegration] = None
 
         # Task handles
         self._tasks = []
@@ -75,6 +81,7 @@ class Orchestrator:
 
         # 1. Join Meet
         self.meet_controller = MeetController()
+        # Note: We don't use context manager here since we need to keep it alive
         success = await self.meet_controller.join_meeting(meet_url)
         if not success:
             raise Exception("Failed to join Meet")
@@ -103,8 +110,31 @@ class Orchestrator:
         # 6. Initialize audio
         self.audio_manager = AudioManager()
 
-        # 7. Initialize overlay (simplified - needs Qt event loop)
-        self.annotation_manager = AnnotationManager()
+        # 7. Initialize Qt overlay
+        if sys.platform == "darwin":
+            # On macOS, NSWindow (and thus all Qt top-level windows) must be
+            # created on the main thread. Our current Qt integration runs in a
+            # background thread, which crashes with:
+            #   NSWindow should only be instantiated on the main thread!
+            # To avoid this crash for now, we disable the overlay on macOS.
+            logger.warning(
+                "macOS detected: disabling Qt overlay to avoid NSWindow main-thread crash. "
+                "Annotations will not be shown as a desktop overlay."
+            )
+            self.qt_integration = None
+            self.annotation_manager = None
+        else:
+            self.qt_integration = QtOverlayIntegration()
+            self.qt_integration.start()
+
+            # Wait a bit for Qt to initialize
+            await asyncio.sleep(0.5)
+
+            # Initialize annotation manager with overlay
+            overlay = self.qt_integration.get_overlay()
+            self.annotation_manager = AnnotationManager(overlay=overlay)
+            if overlay:
+                await self.annotation_manager.start_cleanup_loop()
 
         logger.success("All components initialized")
 
@@ -190,7 +220,10 @@ class Orchestrator:
                 # Handle annotations (if any)
                 annotations = result.get('annotations', [])
                 if annotations and self.annotation_manager:
-                    await self.annotation_manager.add_annotations(annotations)
+                    # Convert to Annotation objects if needed
+                    annotation_objects = self._convert_annotations(annotations)
+                    if annotation_objects:
+                        await self.annotation_manager.add_annotations(annotation_objects)
 
             except Exception as e:
                 logger.error(f"Error handling AI response: {e}")
@@ -222,6 +255,10 @@ class Orchestrator:
             self.audio_manager.set_transcription_callback(self._on_transcription)
             self.audio_manager.set_audio_generated_callback(self._on_audio_generated)
 
+        # Start audio capture
+        if self.audio_manager:
+            await self._start_audio_capture()
+
         logger.info(f"Started {len(self._tasks)} async loops")
 
     async def _screen_capture_loop(self):
@@ -237,7 +274,11 @@ class Orchestrator:
                     # Check for changes
                     if self.screen_capturer.detect_significant_change(frame):
                         # Add to buffer
-                        await self.frame_buffer.add_frame(frame, changed=True)
+                        if self.frame_buffer:
+                            await self.frame_buffer.add_frame(frame, changed=True)
+
+                        # Update state
+                        await self.state.update_screen(frame)
 
                         # Publish event
                         await self.event_bus.publish('screen_changed', frame)
@@ -260,6 +301,57 @@ class Orchestrator:
         if self.audio_injector:
             await self.audio_injector.inject_audio(audio_data)
 
+    async def _start_audio_capture(self):
+        """Start audio capture loop."""
+        try:
+            # Initialize audio capture (using microphone for now)
+            self.audio_capture = AudioCapture(source="microphone")
+            
+            # Start capturing with callback to audio manager
+            await self.audio_capture.start_capture(
+                callback=self._on_audio_chunk
+            )
+            
+            logger.success("Audio capture started")
+            
+        except Exception as e:
+            logger.error(f"Error starting audio capture: {e}")
+            # Continue without audio capture if it fails
+
+    async def _on_audio_chunk(self, audio_chunk: bytes):
+        """Handle incoming audio chunk."""
+        if self.audio_manager:
+            await self.audio_manager.process_audio_chunk(audio_chunk)
+
+    def _convert_annotations(self, annotations) -> list:
+        """
+        Convert annotation dictionaries to Annotation objects.
+
+        Args:
+            annotations: List of annotation dicts or Annotation objects
+
+        Returns:
+            List of Annotation objects
+        """
+        result = []
+        for ann in annotations:
+            if isinstance(ann, Annotation):
+                result.append(ann)
+            elif isinstance(ann, dict):
+                # Convert dict to Annotation object
+                try:
+                    annotation = Annotation(
+                        annotation_type=ann.get('type', 'arrow'),
+                        position=ann.get('position', (0, 0, 100, 100)),
+                        color=ann.get('color'),
+                        text=ann.get('text'),
+                        duration=ann.get('duration')
+                    )
+                    result.append(annotation)
+                except Exception as e:
+                    logger.error(f"Error converting annotation: {e}")
+        return result
+
     async def stop(self):
         """Stop the orchestrator and clean up."""
         logger.info("Stopping orchestrator...")
@@ -275,6 +367,15 @@ class Orchestrator:
                 pass
 
         # Clean up components
+        if self.audio_capture:
+            await self.audio_capture.stop_capture()
+
+        if self.annotation_manager:
+            await self.annotation_manager.stop_cleanup_loop()
+
+        if self.qt_integration:
+            self.qt_integration.stop()
+
         if self.meet_controller:
             await self.meet_controller.cleanup()
 

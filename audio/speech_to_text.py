@@ -35,6 +35,16 @@ class SpeechToText:
         try:
             language = language or self.language
 
+            # Guard against very short clips that Whisper API rejects (<0.1s)
+            bytes_per_second = config.audio.sample_rate * config.audio.channels * 2  # 16-bit PCM
+            if bytes_per_second > 0:
+                duration_sec = len(audio_data) / bytes_per_second
+                if duration_sec < 0.11:
+                    logger.warning(
+                        f"Skipping transcription: audio too short ({duration_sec:.3f}s < 0.11s minimum)"
+                    )
+                    return ""
+
             # Whisper API requires a file, so create temporary file
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
                 temp_file.write(audio_data)

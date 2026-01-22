@@ -200,7 +200,7 @@ class ScreenCaptureConfig(BaseModel):
 ### AI Settings
 ```python
 class AIConfig(BaseModel):
-    model: str = "claude-3-5-sonnet-20241022"
+    model: str = os.getenv("ANTHROPIC_MODEL", "claude-3-sonnet-20240229")
     max_tokens: int = 1024
     temperature: float = 0.7
     max_context_messages: int = 10
