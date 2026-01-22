@@ -181,6 +181,10 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        # Run playwright install before starting the main loop
+        import subprocess
+        subprocess.run(["playwright", "install"], check=True)
+        
         exit_code = asyncio.run(main())
         sys.exit(exit_code)
     except KeyboardInterrupt:
