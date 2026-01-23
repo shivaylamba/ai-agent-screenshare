@@ -27,6 +27,13 @@ class AudioManager:
         self.on_transcription_callback: Optional[Callable] = None
         self.on_audio_generated_callback: Optional[Callable] = None
 
+        # Processing state
+        self._processing_buffer = False
+        self._last_transcription: Optional[str] = None
+        self._last_transcription_time = 0.0
+        self._cooldown_period = 3.0  # Seconds to wait before processing same transcription again
+        self._is_speaking = False  # Track when TTS is playing
+
         logger.info("Audio manager initialized")
 
     async def process_audio_chunk(self, audio_chunk: bytes):
@@ -37,6 +44,14 @@ class AudioManager:
             audio_chunk: Audio data in bytes
         """
         try:
+            # Skip processing if we're currently speaking (prevent feedback loop)
+            if self._is_speaking:
+                return
+
+            # Skip if already processing buffer
+            if self._processing_buffer:
+                return
+
             # Check for voice activity
             has_speech = self.vad.is_speech(audio_chunk)
 
@@ -61,17 +76,43 @@ class AudioManager:
         if not self.audio_buffer:
             return
 
+        # Prevent concurrent processing
+        if self._processing_buffer:
+            logger.debug("Already processing audio buffer, skipping")
+            return
+
+        self._processing_buffer = True
+
         try:
+            import time
+            current_time = time.time()
+
             logger.info(f"Processing {len(self.audio_buffer)} audio chunks")
 
+            # Reset buffer immediately to prevent duplicate processing
+            buffer_copy = self.audio_buffer.copy()
+            self.audio_buffer = []
+            self.is_listening = False
+            self.silence_counter = 0
+
             # Convert chunks to WAV format
-            wav_data = self._chunks_to_wav(self.audio_buffer)
+            wav_data = self._chunks_to_wav(buffer_copy)
 
             # Transcribe
             text = await self.stt.transcribe(wav_data)
 
             # Validate transcription
             if self.stt.is_valid_transcription(text):
+                # Check for duplicate transcription (same text within cooldown period)
+                if (text == self._last_transcription and 
+                    current_time - self._last_transcription_time < self._cooldown_period):
+                    logger.debug(f"Skipping duplicate transcription: '{text}' (within cooldown)")
+                    return
+
+                # Update last transcription
+                self._last_transcription = text
+                self._last_transcription_time = current_time
+
                 logger.success(f"User said: '{text}'")
 
                 # Call callback if set
@@ -81,13 +122,10 @@ class AudioManager:
                     else:
                         self.on_transcription_callback(text)
 
-            # Reset buffer
-            self.audio_buffer = []
-            self.is_listening = False
-            self.silence_counter = 0
-
         except Exception as e:
             logger.error(f"Error processing buffered audio: {e}")
+        finally:
+            self._processing_buffer = False
 
     def _chunks_to_wav(self, chunks: list[bytes]) -> bytes:
         """
@@ -120,6 +158,9 @@ class AudioManager:
             text: Text to convert to speech
         """
         try:
+            # Mark as speaking to prevent feedback loop
+            self._is_speaking = True
+
             logger.info(f"Synthesizing: '{text[:50]}...'")
 
             # Generate speech
@@ -132,8 +173,19 @@ class AudioManager:
                 else:
                     self.on_audio_generated_callback(audio_data)
 
+            # Estimate speaking duration (rough estimate: ~150 words per minute)
+            import time
+            word_count = len(text.split())
+            estimated_duration = (word_count / 150.0) * 60.0  # seconds
+            # Add buffer time
+            await asyncio.sleep(min(estimated_duration + 1.0, 10.0))
+
         except Exception as e:
             logger.error(f"Error synthesizing speech: {e}")
+        finally:
+            # Unmute after speaking is done
+            self._is_speaking = False
+            logger.debug("Finished speaking, audio capture re-enabled")
 
     def set_transcription_callback(self, callback: Callable):
         """

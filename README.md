@@ -91,7 +91,7 @@ Edit `.env` and add your API keys:
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 OPENAI_API_KEY=sk-your-key-here
 ELEVENLABS_API_KEY=your-elevenlabs-key-here
-MEET_URL=https://meet.google.com/your-meeting-code
+MEET_URL=https://meet.google.com/akx-ibkh-sgd
 ```
 
 ## Usage

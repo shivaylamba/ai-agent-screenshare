@@ -89,9 +89,12 @@ class Orchestrator:
         await self.state.set_meeting_state(in_meeting=True)
 
         # 2. Initialize audio injector
+        # Note: The audio interceptor is already injected via meet_controller's init_script
         if self.meet_controller.page:
             self.audio_injector = AudioInjector(self.meet_controller.page)
-            await self.audio_injector.initialize_audio_context()
+            # Check if audio injection is ready
+            status = await self.audio_injector.check_status()
+            logger.info(f"Audio injector status: {status}")
 
         # 3. Wait for screen share
         logger.info("Waiting for screen share...")
