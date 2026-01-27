@@ -94,195 +94,283 @@ class MeetController:
             # This script will be executed before any page scripts run
             await self.page.add_init_script("""
                 (function() {
-                    console.log('[AudioInjector] Installing interceptors...');
-                    
-                    // Store originals
-                    const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-                    const OriginalRTCPeerConnection = window.RTCPeerConnection;
-                    
+                    console.log('[AudioInjector] Installing simplified audio injection system...');
+
+                    // Initialize global state
                     window._audioInjectorReady = false;
-                    window._rtcConnections = [];
-                    window._audioSender = null;
-                    
-                    // Override getUserMedia
-                    navigator.mediaDevices.getUserMedia = async function(constraints) {
-                        console.log('[AudioInjector] getUserMedia intercepted:', JSON.stringify(constraints));
-                        
-                        const originalStream = await originalGetUserMedia(constraints);
-                        
-                        if (constraints && constraints.audio) {
-                            console.log('[AudioInjector] Setting up audio injection...');
-                            
-                            try {
-                                const AudioContext = window.AudioContext || window.webkitAudioContext;
-                                window.injectorAudioContext = new AudioContext();
-                                
-                                if (window.injectorAudioContext.state === 'suspended') {
-                                    await window.injectorAudioContext.resume();
+                    window._audioInjectorActiveConnections = new Set();
+                    window._audioInjectorAudioElements = new Map();
+
+                    // Simplified approach: We'll inject audio directly into active MediaStreams
+                    window.injectAudioToMeetWithLocalPlayback = async function(base64Audio) {
+                        console.log('[AudioInjector] injectAudioToMeetWithLocalPlayback called');
+
+                        try {
+                            // Always try local playback first (guaranteed to work)
+                            const localSuccess = await window._playAudioLocally(base64Audio);
+                            if (!localSuccess) {
+                                console.warn('[AudioInjector] Local playback failed');
+                            }
+
+                            // Try to inject into Meet streams
+                            const meetSuccess = await window._injectIntoMeetStreams(base64Audio);
+                            if (!meetSuccess) {
+                                console.warn('[AudioInjector] Meet injection failed, only local playback active');
+                            }
+
+                            return {
+                                success: true,
+                                localPlayback: localSuccess,
+                                meetInjection: meetSuccess,
+                                duration: 0 // Will be calculated
+                            };
+
+                        } catch (err) {
+                            console.error('[AudioInjector] Error in injectAudioToMeetWithLocalPlayback:', err);
+                            return { success: false, error: err.message };
+                        }
+                    };
+
+                    // Local playback function
+                    window._playAudioLocally = async function(base64Audio) {
+                        try {
+                            const audioUrl = 'data:audio/mp3;base64,' + base64Audio;
+                            const audio = new Audio(audioUrl);
+                            audio.volume = 1.0;
+
+                            return new Promise((resolve) => {
+                                audio.onended = () => {
+                                    console.log('[AudioInjector] Local audio playback completed');
+                                    resolve(true);
+                                };
+                                audio.onerror = (e) => {
+                                    console.error('[AudioInjector] Local audio playback error:', e);
+                                    resolve(false);
+                                };
+                                audio.play().then(() => {
+                                    console.log('[AudioInjector] Local audio started playing');
+                                }).catch(e => {
+                                    console.error('[AudioInjector] Local audio play failed:', e);
+                                    resolve(false);
+                                });
+                            });
+                        } catch (e) {
+                            console.error('[AudioInjector] Local playback setup error:', e);
+                            return false;
+                        }
+                    };
+
+                    // Meet stream injection function
+                    window._injectIntoMeetStreams = async function(base64Audio) {
+                        try {
+                            // Find all active MediaStreams with audio tracks
+                            const streams = window._findActiveAudioStreams();
+                            if (streams.length === 0) {
+                                console.log('[AudioInjector] No active audio streams found');
+                                return false;
+                            }
+
+                            console.log('[AudioInjector] Found', streams.length, 'active audio streams');
+
+                            // Try to inject into each stream
+                            let successCount = 0;
+                            for (const stream of streams) {
+                                try {
+                                    const injected = await window._injectIntoStream(stream, base64Audio);
+                                    if (injected) successCount++;
+                                } catch (e) {
+                                    console.warn('[AudioInjector] Failed to inject into stream:', e);
                                 }
-                                
-                                // Create mixer
-                                window.injectorGainNode = window.injectorAudioContext.createGain();
-                                window.injectorGainNode.gain.value = 1.0;
-                                
-                                // Create destination for WebRTC
-                                window.injectorDestination = window.injectorAudioContext.createMediaStreamDestination();
-                                window.injectorGainNode.connect(window.injectorDestination);
-                                
-                                // Connect mic to mixer
-                                const micSource = window.injectorAudioContext.createMediaStreamSource(originalStream);
-                                micSource.connect(window.injectorGainNode);
-                                
-                                // Store references
-                                window.originalMicStream = originalStream;
-                                window.mixedStream = window.injectorDestination.stream;
-                                window.mixedAudioTrack = window.mixedStream.getAudioTracks()[0];
-                                
-                                // Create final stream
-                                const videoTracks = originalStream.getVideoTracks();
-                                const finalStream = new MediaStream([...videoTracks, window.mixedAudioTrack]);
-                                
-                                window._audioInjectorReady = true;
-                                console.log('[AudioInjector] Ready! Mixed track ID:', window.mixedAudioTrack.id);
-                                
-                                return finalStream;
-                                
-                            } catch (err) {
-                                console.error('[AudioInjector] Setup error:', err);
-                                return originalStream;
+                            }
+
+                            return successCount > 0;
+
+                        } catch (err) {
+                            console.error('[AudioInjector] Meet injection error:', err);
+                            return false;
+                        }
+                    };
+
+                    // Find active audio streams
+                    window._findActiveAudioStreams = function() {
+                        const streams = [];
+
+                        // Check RTCPeerConnection senders
+                        if (window._audioInjectorActiveConnections) {
+                            for (const pc of window._audioInjectorActiveConnections) {
+                                try {
+                                    const senders = pc.getSenders();
+                                    for (const sender of senders) {
+                                        if (sender.track && sender.track.kind === 'audio') {
+                                            streams.push(sender.track);
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.debug('[AudioInjector] Error checking peer connection:', e);
+                                }
                             }
                         }
-                        
-                        return originalStream;
+
+                        // Check getUserMedia streams stored globally
+                        if (window._userMediaStreams) {
+                            streams.push(...window._userMediaStreams);
+                        }
+
+                        // Check for any MediaStream objects in window
+                        for (const key in window) {
+                            try {
+                                const obj = window[key];
+                                if (obj instanceof MediaStream && obj.getAudioTracks().length > 0) {
+                                    streams.push(obj);
+                                }
+                            } catch (e) {
+                                // Ignore errors
+                            }
+                        }
+
+                        return [...new Set(streams)]; // Deduplicate
                     };
-                    
-                    // Also intercept RTCPeerConnection to track audio senders
+
+                    // Inject audio into a specific stream
+                    window._injectIntoStream = async function(stream, base64Audio) {
+                        try {
+                            // Create audio context if needed
+                            if (!window._injectorAudioContext) {
+                                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                                window._injectorAudioContext = new AudioContext();
+                            }
+
+                            if (window._injectorAudioContext.state === 'suspended') {
+                                await window._injectorAudioContext.resume();
+                            }
+
+                            // Decode audio data
+                            const binaryString = atob(base64Audio);
+                            const bytes = new Uint8Array(binaryString.length);
+                            for (let i = 0; i < binaryString.length; i++) {
+                                bytes[i] = binaryString.charCodeAt(i);
+                            }
+
+                            const audioBuffer = await window._injectorAudioContext.decodeAudioData(bytes.buffer.slice(0));
+
+                            // Create source and destination
+                            const source = window._injectorAudioContext.createBufferSource();
+                            source.buffer = audioBuffer;
+
+                            // Try to connect to the stream's audio track
+                            if (stream instanceof MediaStreamTrack && stream.kind === 'audio') {
+                                // If it's a track, we need to create a new MediaStream with our audio mixed in
+                                console.log('[AudioInjector] Injecting into audio track');
+
+                                // Create a new MediaStream with the injected audio
+                                const mixedDestination = window._injectorAudioContext.createMediaStreamDestination();
+
+                                // Mix original track with injected audio
+                                const originalSource = window._injectorAudioContext.createMediaStreamSource(new MediaStream([stream]));
+                                const gainNode = window._injectorAudioContext.createGain();
+
+                                originalSource.connect(gainNode);
+                                source.connect(gainNode);
+                                gainNode.connect(mixedDestination);
+
+                                source.start(0);
+
+                                // Try to replace the track in any peer connections
+                                window._replaceAudioTrack(stream, mixedDestination.stream.getAudioTracks()[0]);
+
+                                return true;
+
+                            } else if (stream instanceof MediaStream) {
+                                // If it's a MediaStream, add our audio to it
+                                console.log('[AudioInjector] Injecting into MediaStream');
+
+                                const mixedDestination = window._injectorAudioContext.createMediaStreamDestination();
+                                const gainNode = window._injectorAudioContext.createGain();
+
+                                // Connect original audio tracks
+                                const audioTracks = stream.getAudioTracks();
+                                for (const track of audioTracks) {
+                                    const trackSource = window._injectorAudioContext.createMediaStreamSource(new MediaStream([track]));
+                                    trackSource.connect(gainNode);
+                                }
+
+                                // Connect injected audio
+                                source.connect(gainNode);
+                                gainNode.connect(mixedDestination);
+
+                                source.start(0);
+
+                                return true;
+                            }
+
+                            return false;
+
+                        } catch (err) {
+                            console.error('[AudioInjector] Stream injection error:', err);
+                            return false;
+                        }
+                    };
+
+                    // Replace audio track in peer connections
+                    window._replaceAudioTrack = function(oldTrack, newTrack) {
+                        if (window._audioInjectorActiveConnections) {
+                            for (const pc of window._audioInjectorActiveConnections) {
+                                try {
+                                    const senders = pc.getSenders();
+                                    for (const sender of senders) {
+                                        if (sender.track === oldTrack) {
+                                            sender.replaceTrack(newTrack);
+                                            console.log('[AudioInjector] Replaced audio track in peer connection');
+                                            return true;
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.debug('[AudioInjector] Error replacing track:', e);
+                                }
+                            }
+                        }
+                        return false;
+                    };
+
+                    // Intercept RTCPeerConnection to track active connections
+                    const OriginalRTCPeerConnection = window.RTCPeerConnection;
                     window.RTCPeerConnection = function(...args) {
                         const pc = new OriginalRTCPeerConnection(...args);
-                        window._rtcConnections.push(pc);
-                        console.log('[AudioInjector] RTCPeerConnection created, total:', window._rtcConnections.length);
-                        
-                        // Override addTrack to catch when audio track is added
-                        const originalAddTrack = pc.addTrack.bind(pc);
-                        pc.addTrack = function(track, ...streams) {
-                            console.log('[AudioInjector] addTrack called:', track.kind, track.id);
-                            
-                            // If this is an audio track and we have a mixed track, use that instead
-                            if (track.kind === 'audio' && window.mixedAudioTrack) {
-                                console.log('[AudioInjector] Replacing with mixed audio track');
-                                const sender = originalAddTrack(window.mixedAudioTrack, ...streams);
-                                window._audioSender = sender;
-                                return sender;
+                        window._audioInjectorActiveConnections.add(pc);
+
+                        // Clean up when connection closes
+                        pc.onconnectionstatechange = function() {
+                            if (pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+                                window._audioInjectorActiveConnections.delete(pc);
                             }
-                            
-                            return originalAddTrack(track, ...streams);
                         };
-                        
+
+                        console.log('[AudioInjector] RTCPeerConnection tracked, total active:', window._audioInjectorActiveConnections.size);
                         return pc;
                     };
-                    
+
                     // Copy static properties
                     Object.keys(OriginalRTCPeerConnection).forEach(key => {
                         window.RTCPeerConnection[key] = OriginalRTCPeerConnection[key];
                     });
                     window.RTCPeerConnection.prototype = OriginalRTCPeerConnection.prototype;
-                    
-                    // Function to inject audio into Meet
-                    window.injectAudioToMeet = async function(base64Audio) {
-                        try {
-                            if (!window._audioInjectorReady || !window.injectorAudioContext) {
-                                console.error('[AudioInjector] Audio injection not ready yet');
-                                return { success: false, error: 'Not ready' };
-                            }
-                            
-                            // Resume context if suspended
-                            if (window.injectorAudioContext.state === 'suspended') {
-                                await window.injectorAudioContext.resume();
-                            }
-                            
-                            // Decode base64
-                            const binaryString = atob(base64Audio);
-                            const bytes = new Uint8Array(binaryString.length);
-                            for (let i = 0; i < binaryString.length; i++) {
-                                bytes[i] = binaryString.charCodeAt(i);
-                            }
-                            
-                            // Decode audio
-                            const audioBuffer = await window.injectorAudioContext.decodeAudioData(bytes.buffer.slice(0));
-                            
-                            // Create source and connect to mixer (goes to Meet)
-                            const source = window.injectorAudioContext.createBufferSource();
-                            source.buffer = audioBuffer;
-                            source.connect(window.injectorGainNode);
-                            
-                            // Start playback
-                            source.start(0);
-                            
-                            console.log('[AudioInjector] Audio injected, duration:', audioBuffer.duration);
-                            return { success: true, duration: audioBuffer.duration };
-                            
-                        } catch (err) {
-                            console.error('[AudioInjector] Injection error:', err);
-                            return { success: false, error: err.message };
+
+                    // Intercept getUserMedia to track streams
+                    const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+                    navigator.mediaDevices.getUserMedia = async function(constraints) {
+                        const stream = await originalGetUserMedia(constraints);
+                        if (!window._userMediaStreams) {
+                            window._userMediaStreams = new Set();
                         }
+                        window._userMediaStreams.add(stream);
+                        console.log('[AudioInjector] getUserMedia stream tracked');
+                        return stream;
                     };
-                    
-                    // Provide local playback + Meet injection
-                    window.injectAudioToMeetWithLocalPlayback = async function(base64Audio) {
-                        try {
-                            console.log('[AudioInjector] injectAudioToMeetWithLocalPlayback called');
-                            
-                            // First, try simple HTML5 Audio for guaranteed local playback
-                            try {
-                                const audioUrl = 'data:audio/mp3;base64,' + base64Audio;
-                                const audio = new Audio(audioUrl);
-                                audio.volume = 1.0;
-                                audio.play().then(() => {
-                                    console.log('[AudioInjector] HTML5 Audio playing locally');
-                                }).catch(e => {
-                                    console.warn('[AudioInjector] HTML5 Audio failed:', e);
-                                });
-                            } catch (e) {
-                                console.warn('[AudioInjector] HTML5 Audio error:', e);
-                            }
-                            
-                            // Now inject into Meet via Web Audio API
-                            if (!window._audioInjectorReady || !window.injectorAudioContext) {
-                                console.warn('[AudioInjector] Web Audio not ready, only playing locally');
-                                return { success: true, duration: 0, localOnly: true };
-                            }
-                            
-                            if (window.injectorAudioContext.state === 'suspended') {
-                                await window.injectorAudioContext.resume();
-                                console.log('[AudioInjector] Audio context resumed');
-                            }
-                            
-                            const binaryString = atob(base64Audio);
-                            const bytes = new Uint8Array(binaryString.length);
-                            for (let i = 0; i < binaryString.length; i++) {
-                                bytes[i] = binaryString.charCodeAt(i);
-                            }
-                            
-                            const audioBuffer = await window.injectorAudioContext.decodeAudioData(bytes.buffer.slice(0));
-                            
-                            const source = window.injectorAudioContext.createBufferSource();
-                            source.buffer = audioBuffer;
-                            
-                            // Connect to Meet mixer (this goes to WebRTC)
-                            source.connect(window.injectorGainNode);
-                            
-                            source.start(0);
-                            
-                            console.log('[AudioInjector] Audio injected to Meet, duration:', audioBuffer.duration);
-                            return { success: true, duration: audioBuffer.duration };
-                            
-                        } catch (err) {
-                            console.error('[AudioInjector] Error:', err);
-                            return { success: false, error: err.message };
-                        }
-                    };
-                    
-                    console.log('[AudioInjector] Interceptor installed successfully');
+
+                    // Legacy function for backward compatibility
+                    window.injectAudioToMeet = window.injectAudioToMeetWithLocalPlayback;
+
+                    console.log('[AudioInjector] Simplified audio injection system installed');
                 })();
             """)
             

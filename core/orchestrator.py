@@ -96,6 +96,12 @@ class Orchestrator:
             status = await self.audio_injector.check_status()
             logger.info(f"Audio injector status: {status}")
 
+            # Log advice based on status
+            if status.get('activeConnections', 0) == 0:
+                logger.warning("⚠️  No WebRTC connections detected. Make sure you're in a Meet call with microphone enabled.")
+            if status.get('audioTracks', 0) == 0:
+                logger.warning("⚠️  No audio tracks found. Make sure microphone is enabled in Meet.")
+
         # 3. Wait for screen share
         logger.info("Waiting for screen share...")
         screen_bounds = await self._wait_for_screen_share()
@@ -386,6 +392,13 @@ class Orchestrator:
             self.screen_capturer.cleanup()
 
         logger.info("Orchestrator stopped")
+
+    async def test_audio_injection(self):
+        """Test audio injection to verify it's working."""
+        if self.audio_injector:
+            await self.audio_injector.test_audio_injection()
+        else:
+            logger.warning("Audio injector not initialized")
 
     def is_running(self) -> bool:
         """

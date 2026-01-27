@@ -31,39 +31,45 @@ class AudioInjector:
             # Convert audio to base64
             audio_base64 = base64.b64encode(audio_data).decode('utf-8')
 
-            # Choose injection function based on local playback preference
-            js_function = "injectAudioToMeetWithLocalPlayback" if local_playback else "injectAudioToMeet"
+            logger.info(f"Injecting audio ({len(audio_data)} bytes)")
 
-            # Check if injection is ready
-            is_ready = await self.page.evaluate("() => window._audioInjectorReady === true")
-            
-            if not is_ready:
-                logger.warning("Audio injector not ready yet - Meet may not have initialized microphone")
-                # Try to play locally at least
-                await self._play_audio_locally(audio_base64)
-                return
-
-            # Inject the audio
-            result = await self.page.evaluate(f"""
-                async function(base64Audio) {{
-                    if (typeof window.{js_function} === 'function') {{
-                        return await window.{js_function}(base64Audio);
-                    }} else {{
-                        console.error('[AudioInjector] Function not found');
-                        return {{ success: false, error: 'Function not initialized' }};
-                    }}
-                }}
+            # Use the simplified injection function that handles both local and Meet playback
+            result = await self.page.evaluate("""
+                async function(base64Audio) {
+                    if (typeof window.injectAudioToMeetWithLocalPlayback === 'function') {
+                        const result = await window.injectAudioToMeetWithLocalPlayback(base64Audio);
+                        console.log('[AudioInjector] Injection result:', result);
+                        return result;
+                    } else {
+                        console.error('[AudioInjector] injectAudioToMeetWithLocalPlayback function not found');
+                        return { success: false, error: 'Function not initialized' };
+                    }
+                }
             """, audio_base64)
 
             if result and result.get('success'):
-                duration = result.get('duration', 0)
-                logger.success(f"Audio injected successfully (duration: {duration:.2f}s)")
+                local_ok = result.get('localPlayback', False)
+                meet_ok = result.get('meetInjection', False)
+                logger.success(f"Audio injection completed - Local: {local_ok}, Meet: {meet_ok}")
+
+                if not meet_ok:
+                    logger.warning("Audio injected locally but NOT into Meet call - check Meet microphone permissions")
             else:
                 error = result.get('error', 'Unknown error') if result else 'No result'
-                logger.warning(f"Audio injection may have failed: {error}")
+                logger.error(f"Audio injection failed: {error}")
+
+                # Fallback to local playback
+                logger.info("Attempting fallback local playback...")
+                await self._play_audio_locally(audio_base64)
 
         except Exception as e:
             logger.error(f"Error injecting audio: {e}")
+            # Try fallback local playback
+            try:
+                audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                await self._play_audio_locally(audio_base64)
+            except Exception as fallback_e:
+                logger.error(f"Fallback local playback also failed: {fallback_e}")
 
     async def _play_audio_locally(self, audio_base64: str):
         """Fallback: play audio through browser's speakers."""
@@ -98,14 +104,57 @@ class AudioInjector:
         """Check if audio injection is properly set up."""
         try:
             status = await self.page.evaluate("""
-                () => ({
-                    ready: window._audioInjectorReady === true,
-                    hasAudioContext: !!window.injectorAudioContext,
-                    audioContextState: window.injectorAudioContext ? window.injectorAudioContext.state : 'none',
-                    hasMixedStream: !!window.mixedStream,
-                    hasOriginalMic: !!window.originalMicStream
-                })
+                () => {
+                    const status = {
+                        hasInjectionFunction: typeof window.injectAudioToMeetWithLocalPlayback === 'function',
+                        activeConnections: window._audioInjectorActiveConnections ? window._audioInjectorActiveConnections.size : 0,
+                        userMediaStreams: window._userMediaStreams ? window._userMediaStreams.size : 0,
+                        audioContext: !!window._injectorAudioContext,
+                        audioContextState: window._injectorAudioContext ? window._injectorAudioContext.state : 'none'
+                    };
+
+                    // Check for active audio tracks
+                    let audioTracks = 0;
+                    if (window._audioInjectorActiveConnections) {
+                        for (const pc of window._audioInjectorActiveConnections) {
+                            try {
+                                const senders = pc.getSenders();
+                                for (const sender of senders) {
+                                    if (sender.track && sender.track.kind === 'audio') {
+                                        audioTracks++;
+                                    }
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                    status.audioTracks = audioTracks;
+
+                    // Check for any MediaStreams in window
+                    let mediaStreams = 0;
+                    for (const key in window) {
+                        try {
+                            const obj = window[key];
+                            if (obj instanceof MediaStream && obj.getAudioTracks().length > 0) {
+                                mediaStreams++;
+                            }
+                        } catch (e) {}
+                    }
+                    status.mediaStreams = mediaStreams;
+
+                    return status;
+                }
             """)
+
+            logger.info(f"Audio injector status: {status}")
+
+            # Provide helpful advice based on status
+            if not status.get('hasInjectionFunction'):
+                logger.warning("Audio injection JavaScript not loaded properly")
+            if status.get('activeConnections', 0) == 0:
+                logger.warning("No active WebRTC connections found - has Meet started the call?")
+            if status.get('audioTracks', 0) == 0:
+                logger.warning("No audio tracks found - microphone may not be active in Meet")
+
             return status
         except Exception as e:
             logger.error(f"Error checking status: {e}")
@@ -123,3 +172,42 @@ class AudioInjector:
         except Exception as e:
             logger.error(f"Error getting audio devices: {e}")
             return []
+
+    async def test_audio_injection(self):
+        """Test audio injection with a simple beep sound."""
+        try:
+            logger.info("Testing audio injection with beep sound...")
+
+            # Create a simple beep sound (1kHz tone for 0.5 seconds)
+            import wave
+            import struct
+            import io
+
+            # Generate beep audio
+            sample_rate = 44100
+            duration = 0.5
+            frequency = 1000
+            num_samples = int(sample_rate * duration)
+
+            # Generate sine wave
+            audio_data = b''
+            for i in range(num_samples):
+                sample = int(32767 * 0.5 * (1 + (i / num_samples) ** 2) * (i / num_samples) * 0.3)  # Simple envelope
+                audio_data += struct.pack('<h', sample)
+
+            # Create WAV file
+            wav_buffer = io.BytesIO()
+            with wave.open(wav_buffer, 'wb') as wav_file:
+                wav_file.setnchannels(1)  # Mono
+                wav_file.setsampwidth(2)  # 16-bit
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(audio_data)
+
+            wav_data = wav_buffer.getvalue()
+
+            # Test injection
+            await self.inject_audio(wav_data)
+            logger.success("Audio injection test completed")
+
+        except Exception as e:
+            logger.error(f"Error testing audio injection: {e}")
